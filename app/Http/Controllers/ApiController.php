@@ -6,213 +6,269 @@ use App\Models\History;
 use App\Models\PopularPosts;
 use App\Models\PopularSearchs;
 use App\Models\Post;
-use App\Models\Search;
-use Illuminate\Database\Eloquent\Casts\Json;
+use Illuminate\Http\JsonResponse;
 use Orhanerday\OpenAi\OpenAi;
 use Stichoza\GoogleTranslate\GoogleTranslate;
 use Illuminate\Support\Facades\Cache;
-use \DetectLanguage\DetectLanguage;
+use DetectLanguage\DetectLanguage;
 use Illuminate\Support\Facades\Http;
-
-
+use Illuminate\Support\Facades\Log;
 
 class ApiController extends Controller
 {
+    private OpenAi $openAi;
+    private GoogleTranslate $translator;
+    
+    public function __construct()
+    {
+        $this->openAi = new OpenAi(config('services.openai.key'));
+        $this->translator = new GoogleTranslate();
+        DetectLanguage::setApiKey(config('services.detect_language.key'));
+    }
+
     /**
-     * Display a listing of the resource.
+     * Get all posts
      */
-    public function post()
+    public function posts(): JsonResponse
     {
-        $resources = Post::all();
-        return response()->json($resources);
-    }
-    public function searches()
-    {
-        $resources = Cache::all();
-        return response()->json($resources);
+        return response()->json(Post::all());
     }
 
-    public function GetSearch($name)
+    /**
+     * Get all cached searches
+     */
+    public function searches(): JsonResponse
     {
-        $resources = Cache::get($name);
-        return response()->json($resources);
+        return response()->json(Cache::getStore()->many(Cache->keys('*')));
     }
 
-    public function history()
+    /**
+     * Get specific cached search
+     */
+    public function getSearch(string $name): JsonResponse
     {
-        $resources = History::all();
-        return response()->json($resources);
-    }
-    public function PupularPost()
-    {
-        $resources = PopularPosts::all();
-        return response()->json($resources);
+        return response()->json(Cache::get($name));
     }
 
-    public function PopularSearch()
+    /**
+     * Get search history
+     */
+    public function history(): JsonResponse
     {
-        $resources = PopularSearchs::all();
-        return response()->json($resources);
+        return response()->json(History::all());
     }
 
-    public function GetPost($name)
+    /**
+     * Get popular posts
+     */
+    public function popularPosts(): JsonResponse
     {
-        $resources = Post::where('title', $name)->get();
-        return response()->json($resources);
+        return response()->json(PopularPosts::all());
     }
 
-    public function chat($text)
+    /**
+     * Get popular searches
+     */
+    public function popularSearches(): JsonResponse
     {
-        // brows keys
-        $open_ai = new OpenAI("api_key");
+        return response()->json(PopularSearchs::all());
+    }
 
-        // make chat
-        $chat = $open_ai->chat([
-            'model' => 'gpt-3.5-turbo',
-            'messages' => [
-                [
-                    "role" => "user",
-                    "content" => "$text"
+    /**
+     * Get post by title
+     */
+    public function getPost(string $title): JsonResponse
+    {
+        return response()->json(Post::where('title', $title)->firstOrFail());
+    }
+
+    /**
+     * Chat with GPT
+     */
+    public function chat(string $text): JsonResponse
+    {
+        try {
+            $response = $this->openAi->chat([
+                'model' => 'gpt-3.5-turbo',
+                'messages' => [
+                    ['role' => 'user', 'content' => $text]
                 ],
-            ],
-            'temperature' => 1.0,
-            // 'max_tokens' => 4000,
-            'frequency_penalty' => 0,
-            'presence_penalty' => 0,
-        ]);
-        $chat_data = json_decode($chat, true);
-        $result = $chat_data['choices'][0];
-        $resources = $result["message"]["content"];
+                'temperature' => 1.0,
+                'frequency_penalty' => 0,
+                'presence_penalty' => 0,
+            ]);
 
-        return response()->json($resources);
+            $responseData = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
+            
+            return response()->json($responseData['choices'][0]['message']['content']);
+        } catch (\Exception $e) {
+            Log::error('Chat API error: ' . $e->getMessage());
+            return response()->json(['error' => 'An error occurred'], 500);
+        }
     }
 
-    public function translate($lan, $text)
+    /**
+     * Translate text
+     */
+    public function translate(string $language, string $text): JsonResponse
     {
-        $tr = new GoogleTranslate();
-        $tr->setTarget($lan);
-        $resources = $tr->translate($text);
-
-        return response()->json($resources);
+        try {
+            $this->translator->setTarget($language);
+            return response()->json($this->translator->translate($text));
+        } catch (\Exception $e) {
+            Log::error('Translation error: ' . $e->getMessage());
+            return response()->json(['error' => 'Translation failed'], 500);
+        }
     }
 
-    public function search($key_word)
+    /**
+     * Search for a keyword
+     */
+    public function search(string $keyword): JsonResponse
     {
-        $cache = Cache::get($key_word);
-        if ($cache) {
-            $resources = [
-                "summarize" => $cache["summarize"],
-                "article" => $cache["article"],
-                "img" => $cache["img_src"],
-                "okay" => $cache["key_word"],
-            ];
-            return response()->json($resources);
-        }
-
-        // set $key_word to array , for confirm inertia
-        $ok = [$key_word];
-        // brows keys
-        $open_ai = new OpenAI("api_key");
-        DetectLanguage::setApiKey("dd31506418887e4a23c11650c3367dd4");
-        // get lang code
-        $languageCode = DetectLanguage::simpleDetect($key_word);
-        // requst to wikipedia
-        $wiki = Http::get("https://" . $languageCode . ".wikipedia.org/w/api.php?format=json&action=query&prop=extracts&exintro&explaintext&redirects=1&titles=" . $key_word)->json()['query']['pages'];
-        $wiki_result = array_values($wiki)[0];
-        // requst to get img wikipedia
-        $wikiImage = Http::get("https://" . $languageCode . ".wikipedia.org/w/api.php?action=query&prop=pageimages&format=json&piprop=original&titles=" . $key_word)->json()['query']['pages'];
-        $wikiImage_result = array_values($wikiImage)[0];
-        // if subject not in wiki pedia extract text is: key word
-        if (!array_key_exists("extract", $wiki_result)) {
-            $wiki_result["extract"] = $key_word;
-        }
-
-        // if subject not in wiki pedia images original image is: our logo
-        if (!array_key_exists("original", $wikiImage_result)) {
-            $wikiImage_result['original'] = ["source" => "/img/azar.png"];
-        }
-
-        // set wiki_result to extracted text
-        $wiki_result = $wiki_result["extract"];
-
-        // if wiki result is to long we make it small
-        if (strlen($wiki_result) > 390) {
-            $split = explode('.', $wiki_result);
-            $wiki_result = $split[0];
-            if ($wiki_result > 390) {
-                $wiki_result = substr($wiki_result, 0, 300);
+        try {
+            // Check cache first
+            if ($cachedResult = Cache::get($keyword)) {
+                return $this->formatSearchResponse($cachedResult);
             }
-        }
 
-        // make requset text
-        if ($languageCode == "fa") {
-            $content_summarize = "توضیحی ای در مورد این متن ارائه دهید. متن: " . $wiki_result;
-            $content_articel = "مقاله ای در مورد : " . $wiki_result;
-        } else {
-            $content_summarize = "explanation of this text . text is: " . $wiki_result;
-            $content_articel = "Write an article about" . $wiki_result;
-        }
+            // Detect language
+            $languageCode = DetectLanguage::simpleDetect($keyword);
+            
+            // Get Wikipedia data
+            $wikiData = $this->getWikipediaData($keyword, $languageCode);
+            $wikiImage = $this->getWikipediaImage($keyword, $languageCode);
 
-        // make summarize request
-        $summarize_chat = $open_ai->chat([
-            'model' => 'gpt-3.5-turbo',
-            'messages' => [
-                [
-                    "role" => "user",
-                    "content" => $content_summarize
-                ],
-            ],
-            'temperature' => 1.0,
-            // 'max_tokens' => 4000,
-            'frequency_penalty' => 0,
-            'presence_penalty' => 0,
+            // Generate AI content
+            $aiResponses = $this->generateAiContent($wikiData['extract'], $languageCode);
+            
+            // Update popular searches
+            $this->updatePopularSearches($keyword, $aiResponses['summarize'], $wikiImage['source']);
+
+            // Prepare and cache result
+            $result = [
+                'key_word' => $keyword,
+                'summarize' => $aiResponses['summarize'],
+                'article' => $aiResponses['article'],
+                'img_src' => $wikiImage['source']
+            ];
+
+            Cache::put($keyword, $result, now()->addHours(24));
+
+            return $this->formatSearchResponse($result);
+        } catch (\Exception $e) {
+            Log::error('Search error: ' . $e->getMessage());
+            return response()->json(['error' => 'Search failed'], 500);
+        }
+    }
+
+    /**
+     * Helper method to format search response
+     */
+    private function formatSearchResponse(array $data): JsonResponse
+    {
+        return response()->json([
+            'summarize' => $data['summarize'],
+            'article' => $data['article'],
+            'img' => $data['img_src'],
+            'okay' => $data['key_word'],
         ]);
-        $summarize_data = json_decode($summarize_chat, true);
-        $summarize = $summarize_data['choices'][0];
-        // make article request
-        $article_chat = $open_ai->chat([
-            'model' => 'gpt-3.5-turbo',
-            'messages' => [
-                [
-                    "role" => "user",
-                    "content" => $content_articel
-                ],
-            ],
-            'temperature' => 1.0,
-            // 'max_tokens' => 4000,
-            'frequency_penalty' => 0,
-            'presence_penalty' => 0,
+    }
+
+    /**
+     * Get Wikipedia extract data
+     */
+    private function getWikipediaData(string $keyword, string $languageCode): array
+    {
+        $response = Http::get("https://{$languageCode}.wikipedia.org/w/api.php", [
+            'format' => 'json',
+            'action' => 'query',
+            'prop' => 'extracts',
+            'exintro' => true,
+            'explaintext' => true,
+            'redirects' => 1,
+            'titles' => $keyword
         ]);
-        $article_data = json_decode($article_chat, true);
-        $article = $article_data['choices'][0];
 
+        $pages = $response->json()['query']['pages'];
+        $page = reset($pages);
 
-        // get popular searches if this key word is in databse,
-        // plus one to views and if not make it and set views to one
-        $popularPost = PopularSearchs::where('key_word', $key_word)->first();
-        if ($popularPost) {
-            $views = $popularPost->views;
-            $popularPost->update([
-                "views" => $views + 1
-            ]);
-        } else {
-            PopularSearchs::create([
-                "key_word" => $key_word,
-                "text" => implode(' ', array_slice(explode(' ', $summarize["message"]["content"]), 0, 10)),
-                "img_src" => $wikiImage_result['original']["source"],
-                "views" => 1
-            ]);
-        }
-
-        $resources = [
-            "key_word" => $key_word,
-            "summarize" => $summarize["message"]["content"],
-            "article" => $article["message"]["content"],
-            "img_src" => $wikiImage_result['original']["source"]
+        return [
+            'extract' => $page['extract'] ?? $keyword,
+            'exists' => isset($page['extract'])
         ];
+    }
 
-        Cache::add($key_word, $resources, now()->addHours(24));
+    /**
+     * Get Wikipedia image
+     */
+    private function getWikipediaImage(string $keyword, string $languageCode): array
+    {
+        $response = Http::get("https://{$languageCode}.wikipedia.org/w/api.php", [
+            'action' => 'query',
+            'prop' => 'pageimages',
+            'format' => 'json',
+            'piprop' => 'original',
+            'titles' => $keyword
+        ]);
 
-        return response()->json($resources);
+        $pages = $response->json()['query']['pages'];
+        $page = reset($pages);
+
+        return [
+            'source' => $page['original']['source'] ?? '/img/azar.png',
+            'exists' => isset($page['original'])
+        ];
+    }
+
+    /**
+     * Generate AI content
+     */
+    private function generateAiContent(string $text, string $languageCode): array
+    {
+        $summarizePrompt = $languageCode === 'fa' 
+            ? "توضیحی ای در مورد این متن ارائه دهید. متن: {$text}"
+            : "explanation of this text. text is: {$text}";
+
+        $articlePrompt = $languageCode === 'fa'
+            ? "مقاله ای در مورد: {$text}"
+            : "Write an article about {$text}";
+
+        return [
+            'summarize' => $this->getAiResponse($summarizePrompt),
+            'article' => $this->getAiResponse($articlePrompt)
+        ];
+    }
+
+    /**
+     * Get AI response
+     */
+    private function getAiResponse(string $prompt): string
+    {
+        $response = $this->openAi->chat([
+            'model' => 'gpt-3.5-turbo',
+            'messages' => [['role' => 'user', 'content' => $prompt]],
+            'temperature' => 1.0,
+            'frequency_penalty' => 0,
+            'presence_penalty' => 0,
+        ]);
+
+        $data = json_decode($response, true, 512, JSON_THROW_ON_ERROR);
+        return $data['choices'][0]['message']['content'];
+    }
+
+    /**
+     * Update popular searches
+     */
+    private function updatePopularSearches(string $keyword, string $text, string $imageSrc): void
+    {
+        PopularSearchs::updateOrCreate(
+            ['key_word' => $keyword],
+            [
+                'text' => implode(' ', array_slice(explode(' ', $text), 0, 10)),
+                'img_src' => $imageSrc,
+                'views' => \DB::raw('views + 1')
+            ]
+        );
     }
 }
