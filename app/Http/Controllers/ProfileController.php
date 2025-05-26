@@ -11,7 +11,8 @@ use Illuminate\Support\Facades\Redirect;
 use Inertia\Inertia;
 use Inertia\Response;
 use Illuminate\Support\Facades\Storage;
-
+use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 class ProfileController extends Controller
 {
@@ -20,11 +21,17 @@ class ProfileController extends Controller
      */
     public function edit(Request $request): Response
     {
-        $user = Auth::user();
         return Inertia::render('Profile/Edit', [
             'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
             'status' => session('status'),
-            'user' => $user
+            'user' => $request->user()->only([
+                'name', 
+                'email', 
+                'phoneNumber', 
+                'gender', 
+                'img',
+                'email_verified_at'
+            ])
         ]);
     }
 
@@ -33,27 +40,24 @@ class ProfileController extends Controller
      */
     public function update(ProfileUpdateRequest $request): RedirectResponse
     {
-        $image = $request->file('img');
-        $request->user()->fill($request->validated());
+        try {
+            $user = $request->user();
+            $userData = $request->validated();
+            
+            if ($request->hasFile('img')) {
+                $this->handleProfileImageUpload($request, $user);
+            }
 
-        if ($request->user()->isDirty('email')) {
-            $request->user()->email_verified_at = null;
-        }
-        $request->user()->phoneNumber = $request->phoneNumber;
-        $request->user()->gender = $request->gender;
-        $image = $request->file('img');
-        if ($image) {
-            $validated = $request->validate([
-                'img' => 'image',
-            ]);
-            $path = Storage::putFile('avatar', $image, 'public');
-            $path_to_array = explode('/', $path);
-            $image->move($path_to_array[0],$path_to_array[1]);
-            $request->user()->img = $path;
-        }
-        $request->user()->save();
+            $this->updateUserProfile($user, $userData);
 
-        return Redirect::route('profile.edit');
+            return Redirect::route('profile.edit')->with('status', 'Profile updated successfully');
+            
+        } catch (ValidationException $e) {
+            throw $e;
+        } catch (\Exception $e) {
+            Log::error('Profile update error: ' . $e->getMessage());
+            return Redirect::back()->with('error', 'Profile update failed');
+        }
     }
 
     /**
@@ -61,23 +65,68 @@ class ProfileController extends Controller
      */
     public function destroy(Request $request): RedirectResponse
     {
-        $request->validate([
-            'password' => ['required', 'current-password'],
-        ]);
+        try {
+            $request->validate([
+                'password' => ['required', 'current-password'],
+            ]);
 
-        $user = $request->user();
+            $user = $request->user();
 
-        Auth::logout();
+            Auth::logout();
+            $user->delete();
 
-        $user->delete();
+            $request->session()->invalidate();
+            $request->session()->regenerateToken();
 
-        $request->session()->invalidate();
-        $request->session()->regenerateToken();
-
-        return Redirect::to('/');
+            return Redirect::to('/')->with('status', 'Account deleted successfully');
+            
+        } catch (\Exception $e) {
+            Log::error('Account deletion error: ' . $e->getMessage());
+            return Redirect::back()->with('error', 'Account deletion failed');
+        }
     }
 
-    public function upload(Request $request)
+    /**
+     * Handle profile image upload
+     */
+    protected function handleProfileImageUpload(Request $request, $user): void
+    {
+        $request->validate([
+            'img' => 'required|image|max:2048',
+        ]);
+
+        $image = $request->file('img');
+        $path = Storage::putFile('avatar', $image, 'public');
+        
+        // Delete old image if exists
+        if ($user->img) {
+            Storage::delete($user->img);
+        }
+
+        $user->img = $path;
+    }
+
+    /**
+     * Update user profile data
+     */
+    protected function updateUserProfile($user, array $data): void
+    {
+        $user->fill($data);
+
+        if ($user->isDirty('email')) {
+            $user->email_verified_at = null;
+        }
+
+        $user->phoneNumber = $data['phoneNumber'] ?? $user->phoneNumber;
+        $user->gender = $data['gender'] ?? $user->gender;
+        
+        $user->save();
+    }
+
+    /**
+     * Handle file upload (for testing purposes)
+     */
+    public function upload(Request $request): void
     {
         dd($request->file());
     }
